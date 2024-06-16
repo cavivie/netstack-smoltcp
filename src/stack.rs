@@ -1,211 +1,129 @@
-use std::{
-    io,
-    net::IpAddr,
-    pin::Pin,
+use smoltcp::iface::{Interface, SocketSet};
+
+use crate::waker::WrapWaker;
+
+use core::{
+    cell::RefCell,
+    future::{poll_fn, Future},
+    pin::pin,
     task::{Context, Poll},
 };
 
-use futures::{Sink, Stream};
-use smoltcp::wire::IpProtocol;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tracing::{debug, trace};
+use smoltcp::phy::Device;
 
-use crate::{
-    filter::{IpFilter, IpFilters},
-    packet::{AnyIpPktFrame, IpPacket},
-    runner::Runner,
-    tcp::TcpListener,
-    udp::UdpSocket,
-};
-
-pub struct StackBuilder {
-    stack_buffer_size: usize,
-    udp_buffer_size: usize,
-    tcp_buffer_size: usize,
-    ip_filters: IpFilters<'static>,
+pub(crate) struct SocketStack {
+    pub(crate) sockets: SocketSet<'static>,
+    pub(crate) iface: Interface,
+    pub(crate) waker: WrapWaker,
 }
 
-impl Default for StackBuilder {
-    fn default() -> Self {
+pub struct Stack<D: Device> {
+    pub(crate) socket_stack: RefCell<SocketStack>,
+    pub(crate) stack_inner: RefCell<StackInner<D>>,
+}
+
+impl<D: Device> Stack<D> {
+    pub fn new(mut device: D) -> Self {
+        let mut iface_cfg = smoltcp::iface::Config::new(smoltcp::wire::HardwareAddress::Ip);
+        iface_cfg.random_seed = rand::random();
+        let mut iface = Interface::new(iface_cfg, &mut device, smoltcp_helper::instant_now());
+        {
+            use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address, Ipv6Address};
+            iface.update_ip_addrs(|ip_addrs| {
+                ip_addrs
+                    .push(IpCidr::new(IpAddress::v4(0, 0, 0, 1), 0))
+                    .expect("iface IPv4");
+                ip_addrs
+                    .push(IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 1), 0))
+                    .expect("iface IPv6");
+            });
+            iface
+                .routes_mut()
+                .add_default_ipv4_route(Ipv4Address::new(0, 0, 0, 1))
+                .expect("IPv4 default route");
+            iface
+                .routes_mut()
+                .add_default_ipv6_route(Ipv6Address::new(0, 0, 0, 0, 0, 0, 0, 1))
+                .expect("IPv6 default route");
+            iface.set_any_ip(true);
+        }
+        let sockets = SocketSet::new(vec![]);
+        let socket_stack = SocketStack {
+            sockets,
+            iface,
+            waker: WrapWaker::new(),
+        };
+
+        let stack_inner = StackInner { device };
+
         Self {
-            stack_buffer_size: 1024,
-            udp_buffer_size: 512,
-            tcp_buffer_size: 512,
-            ip_filters: IpFilters::with_non_broadcast(),
+            socket_stack: RefCell::new(socket_stack),
+            stack_inner: RefCell::new(stack_inner),
+        }
+    }
+
+    /// Run the network stack.
+    ///
+    /// You must call this in a background task, to process network events.
+    pub async fn run(&self) -> ! {
+        poll_fn(|cx| self.poll(cx)).await;
+        unreachable!()
+    }
+
+    /// Poll the network stack once.
+    ///
+    /// You must call this in a background task loop, to process network events.
+    pub fn poll(&self, cx: &mut Context<'_>) -> Poll<()> {
+        self.with_mut(|s, i| i.poll(cx, s));
+        Poll::<()>::Pending
+    }
+
+    fn with_mut<R>(&self, f: impl FnOnce(&mut SocketStack, &mut StackInner<D>) -> R) -> R {
+        f(
+            &mut *self.socket_stack.borrow_mut(),
+            &mut *self.stack_inner.borrow_mut(),
+        )
+    }
+
+    #[allow(unused)]
+    fn with<R>(&self, f: impl FnOnce(&SocketStack, &StackInner<D>) -> R) -> R {
+        f(&*self.socket_stack.borrow(), &*self.stack_inner.borrow())
+    }
+}
+
+pub(crate) struct StackInner<D: Device> {
+    device: D,
+}
+
+impl<D: Device> StackInner<D> {
+    fn poll(&mut self, cx: &mut Context<'_>, stack: &mut SocketStack) {
+        stack.waker.register(cx.waker());
+
+        let timestamp = smoltcp_helper::instant_now();
+        let device = &mut self.device;
+        stack.iface.poll(timestamp, device, &mut stack.sockets);
+
+        if let Some(poll_at) = stack.iface.poll_at(timestamp, &mut stack.sockets) {
+            let t = pin!(smoltcp_helper::timer_from(poll_at));
+            if t.poll(cx).is_ready() {
+                cx.waker().wake_by_ref();
+            }
         }
     }
 }
 
-#[allow(unused)]
-impl StackBuilder {
-    pub fn stack_buffer_size(mut self, size: usize) -> Self {
-        self.stack_buffer_size = size;
-        self
+mod smoltcp_helper {
+    use async_timer::{new_timer, Timer};
+    use core::time::Duration;
+    use smoltcp::time::Instant;
+
+    pub(crate) fn instant_now() -> Instant {
+        #[cfg(feature = "std")]
+        smoltcp::time::Instant::now()
     }
 
-    pub fn udp_buffer_size(mut self, size: usize) -> Self {
-        self.udp_buffer_size = size;
-        self
-    }
-
-    pub fn tcp_buffer_size(mut self, size: usize) -> Self {
-        self.tcp_buffer_size = size;
-        self
-    }
-
-    pub fn set_ip_filters(mut self, filters: IpFilters<'static>) -> Self {
-        self.ip_filters = filters;
-        self
-    }
-
-    pub fn add_ip_filter(mut self, filter: IpFilter<'static>) -> Self {
-        self.ip_filters.add(filter);
-        self
-    }
-
-    pub fn add_ip_filter_fn<F>(mut self, filter: F) -> Self
-    where
-        F: Fn(&IpAddr, &IpAddr) -> bool + Send + Sync + 'static,
-    {
-        self.ip_filters.add_fn(filter);
-        self
-    }
-
-    pub fn build(self) -> (Runner, UdpSocket, TcpListener, Stack) {
-        let (stack_tx, stack_rx) = channel(self.stack_buffer_size);
-        let (udp_tx, udp_rx) = channel(self.udp_buffer_size);
-        let (tcp_tx, tcp_rx) = channel(self.tcp_buffer_size);
-
-        let udp_socket = UdpSocket::new(udp_rx, stack_tx.clone());
-        let (tcp_runner, tcp_listener) = TcpListener::new(tcp_rx, stack_tx);
-        let stack = Stack {
-            ip_filters: self.ip_filters,
-            sink_buf: None,
-            stack_rx,
-            udp_tx,
-            tcp_tx,
-        };
-
-        (tcp_runner, udp_socket, tcp_listener, stack)
-    }
-
-    pub fn run(self) -> (UdpSocket, TcpListener, Stack) {
-        let (tcp_runner, udp_socket, tcp_listener, stack) = self.build();
-        tokio::task::spawn(tcp_runner);
-        (udp_socket, tcp_listener, stack)
-    }
-
-    pub fn run_local(self) -> (UdpSocket, TcpListener, Stack) {
-        let (tcp_runner, udp_socket, tcp_listener, stack) = self.build();
-        tokio::task::spawn_local(tcp_runner);
-        (udp_socket, tcp_listener, stack)
-    }
-}
-
-pub struct Stack {
-    ip_filters: IpFilters<'static>,
-    sink_buf: Option<AnyIpPktFrame>,
-    udp_tx: Sender<AnyIpPktFrame>,
-    tcp_tx: Sender<AnyIpPktFrame>,
-    stack_rx: Receiver<AnyIpPktFrame>,
-}
-
-// Recv from stack.
-impl Stream for Stack {
-    type Item = io::Result<AnyIpPktFrame>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.stack_rx.poll_recv(cx) {
-            Poll::Ready(Some(pkt)) => Poll::Ready(Some(Ok(pkt))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-// Send to stack.
-impl Sink<AnyIpPktFrame> for Stack {
-    type Error = io::Error;
-
-    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.sink_buf.is_none() {
-            Poll::Ready(Ok(()))
-        } else {
-            self.poll_flush(cx)
-        }
-    }
-
-    fn start_send(mut self: Pin<&mut Self>, item: AnyIpPktFrame) -> Result<(), Self::Error> {
-        self.sink_buf.replace(item);
-        Ok(())
-    }
-
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Result<(), Self::Error>> {
-        let Some(item) = self.sink_buf.take() else {
-            return Poll::Ready(Ok(()));
-        };
-
-        if item.is_empty() {
-            return Poll::Ready(Ok(()));
-        }
-
-        let packet = IpPacket::new_checked(item.as_slice()).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("invalid IP packet: {}", err),
-            )
-        })?;
-
-        let src_ip = packet.src_addr();
-        let dst_ip = packet.dst_addr();
-
-        let addr_allowed = self.ip_filters.is_allowed(&src_ip, &dst_ip);
-        if !addr_allowed {
-            trace!(
-                "IP packet {} -> {} (allowed? {}) throwing away",
-                src_ip,
-                dst_ip,
-                addr_allowed,
-            );
-            return Poll::Ready(Ok(()));
-        }
-
-        match packet.protocol() {
-            IpProtocol::Tcp => {
-                self.tcp_tx
-                    .try_send(item)
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
-                Poll::Ready(Ok(()))
-            }
-            IpProtocol::Udp => {
-                self.udp_tx
-                    .try_send(item)
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
-                Poll::Ready(Ok(()))
-            }
-            IpProtocol::Icmp | IpProtocol::Icmpv6 => {
-                // ICMP is handled by TCP's Interface.
-                // smoltcp's interface will always send replies to EchoRequest
-                self.tcp_tx
-                    .try_send(item)
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
-                Poll::Ready(Ok(()))
-            }
-            protocol => {
-                debug!("tun IP packet ignored (protocol: {:?})", protocol);
-                Poll::Ready(Ok(()))
-            }
-        }
-    }
-
-    fn poll_close(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Result<(), Self::Error>> {
-        self.stack_rx.close();
-        Poll::Ready(Ok(()))
+    pub(crate) fn timer_from(instant: Instant) -> impl Timer {
+        let duration = (instant - instant_now()).micros();
+        new_timer(Duration::from_micros(duration))
     }
 }
