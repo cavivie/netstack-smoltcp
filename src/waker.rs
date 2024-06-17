@@ -3,12 +3,12 @@ use core::task::Waker;
 
 /// WrapWaker to register and wake a waker.
 #[derive(Debug, Default)]
-pub struct WrapWaker {
+pub struct WakerRegistration {
     waker: Option<Waker>,
 }
 
-impl WrapWaker {
-    /// Create a new `WrapWaker`.
+impl WakerRegistration {
+    /// Create a new `WakerRegistration`.
     pub const fn new() -> Self {
         Self { waker: None }
     }
@@ -40,9 +40,7 @@ impl WrapWaker {
 
     /// Wake the registered waker, if any.
     pub fn wake(&mut self) {
-        if let Some(w) = self.waker.take() {
-            w.wake()
-        }
+        self.waker.take().map(|w| w.wake());
     }
 
     /// Returns true if a waker is currently registered

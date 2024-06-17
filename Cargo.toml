@@ -15,8 +15,10 @@ into TCP streams and UDP packets. It uses smoltcp-rs as the backend netstack.
 """
 
 [features]
-default = ["std"]
+default = ["std", "tokio-io", "futures-io"]
 std = []
+tokio-io = []
+futures-io = []
 
 [dependencies]
 tracing = { version = "0.1", default-features = false, features = ["std"] }

@@ -1,6 +1,6 @@
 use smoltcp::iface::{Interface, SocketSet};
 
-use crate::waker::WrapWaker;
+use crate::waker::WakerRegistration;
 
 use core::{
     cell::RefCell,
@@ -11,10 +11,36 @@ use core::{
 
 use smoltcp::phy::Device;
 
+const LOCAL_PORT_MIN: u16 = 1025;
+const LOCAL_PORT_MAX: u16 = 65535;
+
 pub(crate) struct SocketStack {
     pub(crate) sockets: SocketSet<'static>,
     pub(crate) iface: Interface,
-    pub(crate) waker: WrapWaker,
+    pub(crate) waker: WakerRegistration,
+    next_local_port: u16,
+}
+
+impl SocketStack {
+    fn new(sockets: SocketSet<'static>, iface: Interface, random_seed: u64) -> Self {
+        Self {
+            sockets,
+            iface,
+            waker: WakerRegistration::new(),
+            next_local_port: (random_seed % (LOCAL_PORT_MAX - LOCAL_PORT_MIN) as u64) as u16
+                + LOCAL_PORT_MIN,
+        }
+    }
+
+    pub(crate) fn next_local_port(&mut self) -> u16 {
+        let res = self.next_local_port;
+        self.next_local_port = if res >= LOCAL_PORT_MAX {
+            LOCAL_PORT_MIN
+        } else {
+            res + 1
+        };
+        res
+    }
 }
 
 pub struct Stack<D: Device> {
@@ -23,9 +49,9 @@ pub struct Stack<D: Device> {
 }
 
 impl<D: Device> Stack<D> {
-    pub fn new(mut device: D) -> Self {
+    pub fn new(mut device: D, random_seed: u64) -> Self {
         let mut iface_cfg = smoltcp::iface::Config::new(smoltcp::wire::HardwareAddress::Ip);
-        iface_cfg.random_seed = rand::random();
+        iface_cfg.random_seed = random_seed;
         let mut iface = Interface::new(iface_cfg, &mut device, smoltcp_helper::instant_now());
         {
             use smoltcp::wire::{IpAddress, IpCidr, Ipv4Address, Ipv6Address};
@@ -48,11 +74,8 @@ impl<D: Device> Stack<D> {
             iface.set_any_ip(true);
         }
         let sockets = SocketSet::new(vec![]);
-        let socket_stack = SocketStack {
-            sockets,
-            iface,
-            waker: WrapWaker::new(),
-        };
+
+        let socket_stack = SocketStack::new(sockets, iface, random_seed);
 
         let stack_inner = StackInner { device };
 
