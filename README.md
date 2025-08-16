@@ -1,5 +1,7 @@
 # Netstack Smoltcp
 
+> Is this really a fork? No, it's definitely not what you think. I lost my admin privileges on the original upstream org, but that wasn't me. Imagine how many orgs on GitHub are backed by companies, individuals, or something else entirely. You should submit issues and pull requests in this repository, not the upstream org. I'm fed up with those orgs masquerading as open source. They manipulate my privileges at will, and I've lost the confidence to continue maintaining them. Perhaps that's not confidence, but trust.
+
 A netstack for the special purpose of turning packets from/to a TUN interface into TCP streams and UDP packets. It uses smoltcp-rs as the backend netstack.
 
 [![Crates.io][crates-badge]][crates-url]

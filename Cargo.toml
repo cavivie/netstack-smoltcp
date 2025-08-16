@@ -1,11 +1,11 @@
 [package]
 name = "netstack-smoltcp"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2021"
 authors = ["cavivie <cavivie@gmail.com>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/automesh-network/netstack-smoltcp"
-homepage = "https://github.com/automesh-network/netstack-smoltcp"
+repository = "https://github.com/cavive/netstack-smoltcp"
+homepage = "https://github.com/cavivie/netstack-smoltcp"
 documentation = "https://docs.rs/netstack-smoltcp"
 keywords = ["netstack", "smoltcp", "network", "ip", "tun"]
 categories = ["network-programming"]
