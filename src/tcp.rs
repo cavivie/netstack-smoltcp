@@ -482,9 +482,7 @@ impl AsyncRead for TcpStream {
             return Poll::Pending;
         }
 
-        let recv_buf = unsafe {
-            std::mem::transmute::<&mut [std::mem::MaybeUninit<u8>], &mut [u8]>(buf.unfilled_mut())
-        };
+        let recv_buf = buf.initialize_unfilled();
         let n = control.recv_buffer.dequeue_slice(recv_buf);
         buf.advance(n);
 
