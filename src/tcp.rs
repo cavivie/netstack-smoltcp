@@ -233,15 +233,17 @@ impl TcpListenerRunner {
                     continue;
                 }
 
-                // SHUT_WR
-                if matches!(control.send_state, TcpSocketState::Close) {
+                // SHUT_WR — only close once the send_buffer has been fully
+                // drained into the smoltcp socket.  Closing earlier transitions
+                // the socket to FIN_WAIT_1, making can_send() return false, so
+                // the send loop below never runs and the remaining data is lost.
+                if matches!(control.send_state, TcpSocketState::Close)
+                    && control.send_buffer.is_empty()
+                {
                     trace!("closing TCP Write Half, {:?}", socket.state());
 
-                    // Close the socket. Set to FIN state
                     socket.close();
                     control.send_state = TcpSocketState::Closing;
-
-                    // We can still process the pending buffer.
                 }
 
                 // Check if readable
