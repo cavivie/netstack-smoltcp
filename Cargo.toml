@@ -1,6 +1,6 @@
 [package]
 name = "netstack-smoltcp"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["cavivie <cavivie@gmail.com>"]
 license = "MIT OR Apache-2.0"
