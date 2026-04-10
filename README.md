@@ -95,6 +95,18 @@ tokio::spawn(async move {
 });
 ```
 
+## Performance
+
+Typically, `netstack-smoltcp` will be used with an tun device, so a careful choice of TUN crate matters.
+
+[tun-rs](https://github.com/tun-rs/tun-rs) have better performance on **Linux** than [rust-tun](https://github.com/meh/rust-tun/) due to GSO/GRO which allow you to process the packets in batches.
+
+`bash scripts/bench-offload.sh` could tell that `tun-rs` boosts the performance by 4x. Try it out on your Linux machine!
+
+The example for using `tun-rs` with `netstack-smoltcp` could be found at [forward-offload-linux.rs](examples/forward-offload-linux.rs)
+
+For further tuning, refer to `tun-rs`'s detailed [README](https://github.com/tun-rs/tun-rs/blob/main/README.md)
+
 ## License
 
 This project is licensed under either of
@@ -119,4 +131,5 @@ Special thanks to these amazing projects that inspired netstack-smoltcp (in no p
 - [netstack-lwip](https://github.com/eycorsican/netstack-lwip/)
 - [rust-tun-active](https://github.com/tun2proxy/rust-tun)
 - [rust-tun](https://github.com/meh/rust-tun/)
+- [tun-rs](https://github.com/tun-rs/tun-rs)
 - [smoltcp](https://github.com/smoltcp-rs/smoltcp)
