@@ -36,6 +36,8 @@ smoltcp = { version = "0.12", default-features = false, features = [
 
 [dev-dependencies]
 tun2 = { version = "3", features = ["async"] }
+# has better performance on linux than tun2
+tun-rs = { version = "2", features = ["async", "async_framed"] } 
 tokio = { version = "1", features = [
     "rt",
     "macros",
