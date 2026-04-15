@@ -1,12 +1,13 @@
 use std::{
     net::IpAddr,
     pin::Pin,
-    task::{Context, Poll},
+    task::{ready, Context, Poll},
 };
 
 use futures::{Sink, Stream};
 use smoltcp::wire::IpProtocol;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::{channel, Receiver};
+use tokio_util::sync::PollSender;
 use tracing::{debug, trace};
 
 use crate::{
@@ -104,14 +105,14 @@ impl StackBuilder {
 
         let (udp_tx, udp_rx) = if self.enable_udp {
             let (udp_tx, udp_rx) = channel(self.udp_buffer_size);
-            (Some(udp_tx), Some(udp_rx))
+            (Some(PollSender::new(udp_tx)), Some(udp_rx))
         } else {
             (None, None)
         };
 
         let (tcp_tx, tcp_rx) = if self.enable_tcp {
             let (tcp_tx, tcp_rx) = channel(self.tcp_buffer_size);
-            (Some(tcp_tx), Some(tcp_rx))
+            (Some(PollSender::new(tcp_tx)), Some(tcp_rx))
         } else {
             (None, None)
         };
@@ -153,45 +154,41 @@ impl StackBuilder {
 pub struct Stack {
     ip_filters: IpFilters<'static>,
     sink_buf: Option<(AnyIpPktFrame, IpProtocol)>,
-    udp_tx: Option<Sender<AnyIpPktFrame>>,
-    tcp_tx: Option<Sender<AnyIpPktFrame>>,
-    icmp_tx: Option<Sender<AnyIpPktFrame>>,
+    udp_tx: Option<PollSender<AnyIpPktFrame>>,
+    tcp_tx: Option<PollSender<AnyIpPktFrame>>,
+    icmp_tx: Option<PollSender<AnyIpPktFrame>>,
     stack_rx: Receiver<AnyIpPktFrame>,
 }
 
 impl Stack {
-    fn poll_send(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+    fn poll_send(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
         let (item, proto) = match self.sink_buf.take() {
             Some(val) => val,
             None => return Poll::Ready(Ok(())),
         };
 
-        let ready_res = match proto {
-            IpProtocol::Tcp => self.tcp_tx.as_mut().map(|tx| tx.try_reserve()),
-            IpProtocol::Udp => self.udp_tx.as_mut().map(|tx| tx.try_reserve()),
-            IpProtocol::Icmp | IpProtocol::Icmpv6 => {
-                self.icmp_tx.as_mut().map(|tx| tx.try_reserve())
-            }
+        let tx = match proto {
+            IpProtocol::Tcp => self.tcp_tx.as_mut(),
+            IpProtocol::Udp => self.udp_tx.as_mut(),
+            IpProtocol::Icmp | IpProtocol::Icmpv6 => self.icmp_tx.as_mut(),
             _ => unreachable!(),
         };
 
-        let Some(ready_res) = ready_res else {
+        let Some(tx) = tx else {
             return Poll::Ready(Ok(()));
         };
 
-        let permit = match ready_res {
-            Ok(permit) => permit,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                self.sink_buf.replace((item, proto));
-                return Poll::Pending;
+        match tx.poll_reserve(cx) {
+            Poll::Pending => {
+                self.sink_buf = Some((item, proto));
+                Poll::Pending
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                return Poll::Ready(Err(channel_closed_err("channel is closed")));
-            }
-        };
-
-        permit.send(item);
-        Poll::Ready(Ok(()))
+            Poll::Ready(Err(_)) => Poll::Ready(Err(channel_closed_err("channel is closed"))),
+            Poll::Ready(Ok(_)) => match tx.send_item(item) {
+                Ok(()) => Poll::Ready(Ok(())),
+                Err(_) => Poll::Ready(Err(channel_closed_err("channel is closed"))),
+            },
+        }
     }
 }
 
@@ -212,12 +209,15 @@ impl Stream for Stack {
 impl Sink<AnyIpPktFrame> for Stack {
     type Error = std::io::Error;
 
-    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.sink_buf.is_none() {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Pending
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // If a buffered item exists, try to flush it first. This also properly
+        // registers the waker via poll_reserve so we get woken when the channel
+        // has capacity. Without this, returning Pending here with _cx unused
+        // means the task never gets rescheduled.
+        if self.sink_buf.is_some() {
+            ready!(self.poll_send(cx))?;
         }
+        Poll::Ready(Ok(()))
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: AnyIpPktFrame) -> Result<(), Self::Error> {
