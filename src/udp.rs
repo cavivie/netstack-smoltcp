@@ -128,7 +128,7 @@ impl Sink<UdpMsg> for WriteHalf {
             .write(&mut ip_packet_writer, &data)
             .map_err(|err| Error::other(format!("PacketBuilder::write: {err}")))?;
 
-        match self.stack_tx.start_send_unpin(ip_packet_writer.clone()) {
+        match self.stack_tx.start_send_unpin(ip_packet_writer) {
             Ok(()) => Ok(()),
             Err(err) => Err(Error::other(format!("send error: {err}"))),
         }
