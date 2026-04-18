@@ -15,11 +15,13 @@ pub(super) struct VirtualDevice {
     in_buf_avail: Arc<AtomicBool>,
     in_buf: UnboundedReceiver<Vec<u8>>,
     out_buf: Sender<AnyIpPktFrame>,
+    mtu: usize,
 }
 
 impl VirtualDevice {
     pub(super) fn new(
         iface_egress_tx: Sender<AnyIpPktFrame>,
+        mtu: usize,
     ) -> (Self, UnboundedSender<Vec<u8>>, Arc<AtomicBool>) {
         let iface_ingress_tx_avail = Arc::new(AtomicBool::new(false));
         let (iface_ingress_tx, iface_ingress_rx) = unbounded_channel();
@@ -28,6 +30,7 @@ impl VirtualDevice {
                 in_buf_avail: iface_ingress_tx_avail.clone(),
                 in_buf: iface_ingress_rx,
                 out_buf: iface_egress_tx,
+                mtu,
             },
             iface_ingress_tx,
             iface_ingress_tx_avail,
@@ -63,7 +66,7 @@ impl Device for VirtualDevice {
     fn capabilities(&self) -> DeviceCapabilities {
         let mut capabilities = DeviceCapabilities::default();
         capabilities.medium = Medium::Ip;
-        capabilities.max_transmission_unit = 1504;
+        capabilities.max_transmission_unit = self.mtu;
         capabilities
     }
 }

@@ -111,7 +111,8 @@ async fn main_exec(opt: Opt) {
     let mut builder = StackBuilder::default()
         .enable_tcp(true)
         .enable_udp(true)
-        .enable_icmp(true);
+        .enable_icmp(true)
+        .mtu(9000);
     if let Some(device_broadcast) = get_device_broadcast(&device) {
         builder = builder
             // .add_ip_filter(Box::new(move |src, dst| *src != device_broadcast && *dst != device_broadcast));

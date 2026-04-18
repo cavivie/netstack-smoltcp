@@ -54,6 +54,7 @@ let (stack, runner, udp_socket, tcp_listener) = netstack_smoltcp::StackBuilder::
     .enable_udp(true)
     .enable_tcp(true)
     .enable_icmp(true)
+    .mtu(9000) // virtual device usually benefits from larger MTU
     .build()
     .unwrap();
 let mut udp_socket = udp_socket.unwrap(); // udp enabled
