@@ -25,6 +25,7 @@ pub struct StackBuilder {
     stack_buffer_size: usize,
     udp_buffer_size: usize,
     tcp_buffer_size: usize,
+    mtu: usize,
     ip_filters: IpFilters<'static>,
 }
 
@@ -37,6 +38,7 @@ impl Default for StackBuilder {
             stack_buffer_size: 1024,
             udp_buffer_size: 512,
             tcp_buffer_size: 512,
+            mtu: 1504, // 1500 for Ethernet + 4 for VLAN
             ip_filters: IpFilters::with_non_broadcast(),
         }
     }
@@ -92,6 +94,11 @@ impl StackBuilder {
         self
     }
 
+    pub fn mtu(mut self, mtu: usize) -> Self {
+        self.mtu = mtu;
+        self
+    }
+
     #[allow(clippy::type_complexity)]
     pub fn build(
         self,
@@ -132,7 +139,7 @@ impl StackBuilder {
         let udp_socket = udp_rx.map(|udp_rx| UdpSocket::new(udp_rx, stack_tx.clone()));
 
         let (tcp_runner, tcp_listener) = if let Some(tcp_rx) = tcp_rx {
-            let (tcp_runner, tcp_listener) = TcpListener::new(tcp_rx, stack_tx)?;
+            let (tcp_runner, tcp_listener) = TcpListener::new(tcp_rx, stack_tx, self.mtu)?;
             (Some(tcp_runner), Some(tcp_listener))
         } else {
             (None, None)

@@ -362,8 +362,10 @@ impl TcpListener {
     pub(super) fn new(
         tcp_rx: Receiver<AnyIpPktFrame>,
         stack_tx: Sender<AnyIpPktFrame>,
+        mtu: usize,
     ) -> std::io::Result<(Runner, Self)> {
-        let (mut device, iface_ingress_tx, iface_ingress_tx_avail) = VirtualDevice::new(stack_tx);
+        let (mut device, iface_ingress_tx, iface_ingress_tx_avail) =
+            VirtualDevice::new(stack_tx, mtu);
         let iface = Self::create_interface(&mut device)?;
 
         let (stream_tx, stream_rx) = unbounded_channel();
