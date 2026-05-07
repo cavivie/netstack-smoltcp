@@ -35,12 +35,11 @@ use tracing::{error, info, warn};
 #[derive(Debug, StructOpt)]
 #[structopt(name = "forward", about = "Simply forward tun tcp/udp traffic.")]
 struct Opt {
-    /// Default binding interface, default by guessed.
-    /// Specify but doesn't exist, no device is bound.
+    /// Binding network interface for sockets.
     #[structopt(short = "i", long = "interface")]
     interface: String,
 
-    /// name of the tun device, default to rtun8.
+    /// name of the tun device, default to utun8.
     #[structopt(short = "n", long = "name", default_value = "utun8")]
     name: String,
 
