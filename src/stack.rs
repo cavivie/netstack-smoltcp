@@ -25,6 +25,11 @@ pub struct StackBuilder {
     stack_buffer_size: usize,
     udp_buffer_size: usize,
     tcp_buffer_size: usize,
+    // Per-socket TCP receive/send window (bytes). Bounds single-flow throughput
+    // via window ÷ RTT. Defaults to the historical ~320 KiB; configurable so
+    // high-BDP hosts can raise it without recompiling.
+    tcp_recv_buffer_size: u32,
+    tcp_send_buffer_size: u32,
     mtu: usize,
     ip_filters: IpFilters<'static>,
 }
@@ -38,6 +43,14 @@ impl Default for StackBuilder {
             stack_buffer_size: 1024,
             udp_buffer_size: 512,
             tcp_buffer_size: 512,
+            // Historical per-socket TCP window, `0x3FFF * 20` (~320 KiB, i.e.
+            // 20 AEAD packets). This is the smoltcp send/recv `SocketBuffer`
+            // capacity; steady single-flow throughput is bounded by window ÷ RTT
+            // (the TCP bandwidth-delay product). Keeping this as the default
+            // leaves behavior unchanged unless the caller raises it via
+            // `tcp_{recv,send}_buffer_size` for a high-BDP path.
+            tcp_recv_buffer_size: 0x3FFF * 20,
+            tcp_send_buffer_size: 0x3FFF * 20,
             mtu: 1504, // 1500 for Ethernet + 4 for VLAN
             ip_filters: IpFilters::with_non_broadcast(),
         }
@@ -73,6 +86,23 @@ impl StackBuilder {
 
     pub fn tcp_buffer_size(mut self, size: usize) -> Self {
         self.tcp_buffer_size = size;
+        self
+    }
+
+    /// Set the per-socket TCP **receive** window in bytes (the smoltcp rx
+    /// `SocketBuffer` capacity). Steady single-flow throughput is bounded by
+    /// `window ÷ RTT`, so raising this helps high-BDP (high bandwidth × RTT)
+    /// paths. Note this is distinct from [`Self::tcp_buffer_size`], which sizes
+    /// the internal mpsc channel (item count), not the TCP window.
+    pub fn tcp_recv_buffer_size(mut self, size: u32) -> Self {
+        self.tcp_recv_buffer_size = size;
+        self
+    }
+
+    /// Set the per-socket TCP **send** window in bytes (the smoltcp tx
+    /// `SocketBuffer` capacity). See [`Self::tcp_recv_buffer_size`].
+    pub fn tcp_send_buffer_size(mut self, size: u32) -> Self {
+        self.tcp_send_buffer_size = size;
         self
     }
 
@@ -139,7 +169,13 @@ impl StackBuilder {
         let udp_socket = udp_rx.map(|udp_rx| UdpSocket::new(udp_rx, stack_tx.clone()));
 
         let (tcp_runner, tcp_listener) = if let Some(tcp_rx) = tcp_rx {
-            let (tcp_runner, tcp_listener) = TcpListener::new(tcp_rx, stack_tx, self.mtu)?;
+            let (tcp_runner, tcp_listener) = TcpListener::new(
+                tcp_rx,
+                stack_tx,
+                self.mtu,
+                self.tcp_recv_buffer_size,
+                self.tcp_send_buffer_size,
+            )?;
             (Some(tcp_runner), Some(tcp_listener))
         } else {
             (None, None)
@@ -276,4 +312,30 @@ where
     E: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
     std::io::Error::new(std::io::ErrorKind::BrokenPipe, err)
+}
+
+#[cfg(test)]
+mod tcp_window_tests {
+    use super::*;
+
+    // The configurable TCP window must (a) default to the historical ~320 KiB so
+    // existing callers are behavior-identical, and (b) carry an override verbatim
+    // into the builder fields that the socket-creation path
+    // (`TcpListener::new` → `create` → `handle_packet`) reads. Those fields are
+    // the only input to the per-socket `SocketBuffer` sizing, so asserting them
+    // is asserting the window smoltcp will allocate.
+    #[test]
+    fn tcp_window_defaults_to_historical_and_threads_overrides() {
+        let d = StackBuilder::default();
+        assert_eq!(d.tcp_recv_buffer_size, 0x3FFF * 20);
+        assert_eq!(d.tcp_send_buffer_size, 0x3FFF * 20);
+
+        let b = StackBuilder::default()
+            .tcp_recv_buffer_size(1 << 20)
+            .tcp_send_buffer_size(2 << 20);
+        assert_eq!(b.tcp_recv_buffer_size, 1 << 20);
+        assert_eq!(b.tcp_send_buffer_size, 2 << 20);
+        // The mpsc-depth knob is independent and must not be conflated.
+        assert_eq!(b.tcp_buffer_size, 512);
+    }
 }
