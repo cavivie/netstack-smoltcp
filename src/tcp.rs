@@ -338,7 +338,20 @@ impl TcpListenerRunner {
                 socket_set.remove(socket_handle);
             }
 
-            if !iface_ingress_tx_avail.load(Ordering::Acquire) {
+            // Ensure every loop iteration yields to the runtime. When egress
+            // capacity is available OR when `poll_delay` returns ZERO ("re-poll
+            // now"), this loop otherwise takes no `.await`, so under an active
+            // flow it busy-spins. Because `handle_socket` and `handle_packet`
+            // are arms of one `tokio::select!` future, a never-yielding
+            // `handle_socket` never returns control to the sibling SYN-accept
+            // arm: one core pins flat at 100% and new inbound connections are
+            // starved (observed as connect timeouts with no SYN-ACK). A
+            // cooperative `yield_now()` keeps the re-poll just as prompt while
+            // letting `handle_packet` make progress. The timed-park path and the
+            // 5 ms idle fallback are unchanged, so there is no missed-wake risk.
+            if iface_ingress_tx_avail.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            } else {
                 let next_duration = iface
                     .poll_delay(before_poll, &socket_set)
                     .unwrap_or(Duration::from_millis(5));
@@ -348,6 +361,8 @@ impl TcpListenerRunner {
                         notify.notified(),
                     )
                     .await;
+                } else {
+                    tokio::task::yield_now().await;
                 }
             }
         }
