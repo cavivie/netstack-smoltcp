@@ -114,8 +114,7 @@ mod tests {
     #[test]
     fn receive_keeps_in_buf_packet_when_out_buf_is_full() {
         let (out_tx, mut out_rx) = channel::<AnyIpPktFrame>(1);
-        let (mut device, ingress_tx, in_buf_avail)
-            = VirtualDevice::new(out_tx.clone(), 1500);
+        let (mut device, ingress_tx, in_buf_avail) = VirtualDevice::new(out_tx.clone(), 1500);
 
         // Saturate the bounded out_buf (capacity 1) so try_reserve() fails.
         out_tx.try_send(vec![0u8; 4]).unwrap();
